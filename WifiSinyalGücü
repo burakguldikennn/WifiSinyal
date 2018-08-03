@@ -1,0 +1,288 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <pthread.h>
+#include <signal.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+
+#define MAX 30
+
+#define PORT    8080
+#define MAXLINE 1024
+
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;  //mutex nesnesine başlangıç değeri atıyor.
+pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+
+struct node
+{
+    char data[256];
+    struct node *next;
+};
+
+struct node* start=NULL;
+
+void konumListele();
+void *wlanListele();
+void *serversocket();
+
+
+char konum1[MAX],konum2[MAX],konum3[MAX];
+
+static int running = 1;
+
+int sock;
+
+
+struct node *dequeue()
+{
+                                                  //burası kuyrukta sırayla gelenlerden baştakini yazdırıyor sırayla null a eşit olmadıkça, bu işlemi yapan bi structer
+	struct node *ret;
+    pthread_mutex_lock(&mutex);                   //dequeue ye lock ve unlock eklemesi yap conditions ile.
+	while (running && !start)
+	{
+        pthread_cond_wait(&cond,&mutex);
+	}
+    pthread_mutex_unlock(&mutex);
+    if ((ret = start) != NULL)
+    {
+        start = start->next;
+    }
+    return ret;
+}
+
+
+
+
+
+
+static void sigint_h(int s)
+{
+	running = 0;
+	puts("Shutting down");
+	close(sock);
+	exit(0);
+}
+
+
+int main()
+{
+
+    printf("Konum Giriniz:\n");
+    fgets(konum1, MAX, stdin);      //konsoldan yazdığımız MAX kadarlık veriyi alır ve konum1 dizisine yazar.
+
+
+    printf("Konum Giriniz:\n");
+    fgets(konum2, MAX, stdin);
+
+
+    printf("Konum Giriniz:\n");
+    fgets(konum3, MAX, stdin);
+
+
+    konumListele(konum1);
+    konumListele(konum2);
+    konumListele(konum3);
+
+
+
+    pthread_t thread1,thread2,thread3;
+    FILE *fp1, *fp2;
+
+    fp1=popen("while true; do sleep 1; echo thread1: $(date +%s); done","r");
+    fp2=popen("while true; do sleep 1; echo thread2: $(date +%s); done","r");
+
+    int yes = 1;
+    struct sockaddr_in broadcast_addr;
+    struct sockaddr_in server_addr;
+    struct sockaddr_in client_addr;
+    int addr_len;
+    int count;
+    int ret;
+    fd_set readfd;
+    char buffer[MAXLINE*MAXLINE];
+    int i;
+
+
+    sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0)
+    {
+        perror("socket hatası");
+        return -1;
+    }
+    addr_len = sizeof(struct sockaddr_in);
+    memset((void*)&server_addr, 0, addr_len);
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = htons(INADDR_ANY);
+    server_addr.sin_port = htons(PORT);
+    ret = bind(sock,(struct sockaddr*)&server_addr,addr_len);
+    if (ret < 0)
+    {
+        perror("bind error\n");
+    }
+
+
+
+    ret = setsockopt(sock, SOL_SOCKET, SO_BROADCAST, (char*)&yes, sizeof(yes));
+    if (ret == -1)
+    {
+        perror("setsockopt hatası");
+        return 0;
+    }
+
+
+    memset((void*)&broadcast_addr, 0, addr_len);
+    broadcast_addr.sin_family = AF_INET;
+    broadcast_addr.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+    broadcast_addr.sin_port = htons(PORT);
+
+
+    //fp1=popen("ubus subscribe hostapd.wlan0","r");      //sinyal gücünü bulurken yukarıdakiler yerine bu komutları kullan onları pasif yap.
+    //fp2=popen("ubus subscribe hostapd.wlan1","r");
+
+
+    signal(SIGINT, sigint_h);
+
+
+    pthread_mutex_lock(&mutex);
+    pthread_create(&thread1,NULL,&wlanListele,fp1);
+    pthread_mutex_unlock(&mutex);
+
+    pthread_mutex_lock(&mutex);
+    pthread_create(&thread2,NULL,&wlanListele,fp2);
+    pthread_mutex_unlock(&mutex);
+
+
+    addr_len = sizeof(struct sockaddr_in);
+
+    memset((void*)&server_addr, 0, addr_len);
+
+    pthread_create(&thread3,NULL,&serversocket,NULL);
+
+
+
+    while (running)
+    {
+        struct node *n;
+
+        n=dequeue();
+
+        if(n==NULL)
+        {
+           break;
+        }
+        printf("%s",n->data);
+        n->next = (void *)0x123455;
+
+
+        sendto(sock,buffer,sizeof(buffer),0,(struct sockaddr*)&broadcast_addr,addr_len);
+
+        // networkden gelmeyenleri sendto(broadcast)
+        free(n);
+    }
+
+// liste başından cek ekrana bas
+
+    pthread_join(thread1,NULL);
+    pthread_join(thread2,NULL);
+    pthread_join(thread3,NULL);
+
+
+    printf("\n\n");
+
+    exit(0);
+
+
+    return 0;
+
+}
+
+void konumListele(char dizi[MAX])
+{
+    int i;
+    printf("Konum Değerlerimiz:");
+
+    for(i=0;i<MAX;i++)
+    {
+
+        printf("%c",dizi[i]);
+    }
+}
+
+void *wlanListele(void *arg)
+{
+    FILE *fp = arg;
+    char buff[256];
+    struct node *q;
+
+    while(running && fgets(buff,sizeof(buff),fp)!=NULL)     //fp den okuyor,buff'a yazıyor,ortadaki parametre buff'a ne kadar yazacağı.
+    {
+        //printf("%s",buff);
+        //liste soununa ekle
+        pthread_mutex_lock(&mutex);
+
+        struct node* eklenecek=(struct node*)malloc(sizeof(struct node));
+        strcpy(eklenecek->data,buff);
+        eklenecek->next=NULL;
+
+
+
+        if(start==NULL)                     //if ve else içine lock unlock eklemesi yap conditions ile.
+        {
+            start=eklenecek;
+        }
+        else
+        {
+            q=start;
+            while(q->next!=NULL)
+            {
+                q=q->next;
+            }
+            q->next=eklenecek;
+        }
+
+        pthread_cond_signal(&cond);
+        pthread_mutex_unlock(&mutex);
+
+       // printf("added: %p\n", start);
+    }
+}
+
+void *serversocket()
+{
+    int addr_len;
+    char buffer[MAXLINE*MAXLINE];
+    struct sockaddr_in client_addr;
+    struct node *q;
+
+
+   while(running)
+   {
+    recvfrom(sock,buffer,MAXLINE*MAXLINE,0,(struct sockaddr*)&client_addr,&addr_len);
+    struct node* eklenecek=(struct node*)malloc(sizeof(struct node));
+    strcpy(eklenecek->data,buffer);
+    eklenecek->next=NULL;
+
+        if(start==NULL)                     //bağlı liseye ekle.
+        {
+            start=eklenecek;
+        }
+        else
+        {
+                q=start;
+                while(q->next!=NULL)
+                {
+                    q=q->next;
+
+                }
+                q->next=eklenecek;
+        }
+
+    }
+}
+
+
